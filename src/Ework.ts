@@ -60,6 +60,10 @@ function* map<T, R, A>(
 export class Ework<Input, Output> {
   private totalWorkers: number;
   private freeWorkers: number;
+  private workersInitPromises: [
+    (value?: unknown) => void,
+    (reason?: any) => void,
+  ][];
   private workers: IWorker<Input, Output>[];
   private queue: IWorkerJob<Input, Output>[];
   private nextWorkId: number;
@@ -113,8 +117,14 @@ export class Ework<Input, Output> {
 
     this.freeWorkers = 0;
 
+    this.workersInitPromises = [];
     this.workers = [];
     for (let i = 0; i < this.totalWorkers; i++) {
+      // @ts-nocheck
+      new Promise((resolve, reject) =>
+        this.workersInitPromises.push([resolve, reject]),
+      );
+
       const workerInstance = spawnWorker(workerCode);
       const workerObj: IWorker<Input, Output> = {
         worker: workerInstance,
@@ -126,12 +136,21 @@ export class Ework<Input, Output> {
         'message',
         (message: IWorkerMessage<Output>) => {
           if (message.type === 'init') {
+            const initPromiseArr = this.workersInitPromises.shift();
             if (message.status === 'success') {
               workerObj.isWorking = false;
+
+              if (initPromiseArr) {
+                const [resolve] = initPromiseArr;
+                resolve();
+              }
               this.freeWorkers++;
               this.run();
             } else {
-              // TODO handle init error
+              if (initPromiseArr) {
+                const [, reject] = initPromiseArr;
+                reject(message.error);
+              }
             }
           } else if (message.type === 'result') {
             const job = workerObj.job;
@@ -157,6 +176,10 @@ export class Ework<Input, Output> {
 
     this.queue = [];
     this.nextWorkId = 0;
+  }
+
+  public async ready(): Promise<void> {
+    await Promise.all(this.workersInitPromises);
   }
 
   public async execute(value: Input): Promise<Output> {
